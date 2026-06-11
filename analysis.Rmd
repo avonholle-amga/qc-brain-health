@@ -1,0 +1,379 @@
+---
+title: 'Brain Health QI preliminary data summary for baseline + intervention period 1 reporting period'
+output:
+  word_document:
+    reference_docx: template2.docx
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  type: 1
+  hco_name: "A"
+editor_options:
+  chunk_output_type: console
+always_allow_html: true
+---
+
+<!-- Note: When running report use the following line -->
+```{r, eval=F, include=FALSE, echo=FALSE}
+#<!-- title: 'Brain Health QI preliminary data summary for baseline reporting period: `r paste0(hco.name2)`' -->
+```
+
+<!-- Note: I had Claude edit 'brain-health-data-report-custom-by-HCO-int1.Rmd ' for conciseness and the original script is now in archive/scripts. Check that file in case there are any errors from this script. -->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F, results = "hide",
+                      fig.width = 7, fig.height = 9, knitr.kable.NA = '')
+```
+
+<!-- Note: this script was edited by Claude to make more concise and is based on 'brain-health-data-report-custom-by-HCO-int1.Rmd', currently in /archive/scripts/. If any problems, refer to the original script. -->
+
+```{r libraries}
+
+library(here)
+library(gt); library(gtsummary)
+library(tidyverse)
+library(readxl); library(kableExtra); library(flextable)
+library(legendry)
+```
+
+
+```{r load-data}
+# note: data from  data-handling.Rmd
+
+load( file="dat.RData") # df and df.wide.tot
+
+# MODIFIED for Shiny app: type and hco.name come from params now
+
+type = params$type
+hco.name = params$hco_name
+
+# MODIFIED for Shiny app: reports are anonymous. hco.name (the real org name,
+# supplied by the app or the YAML default) is kept ONLY for internal logic
+# below; the org label shown in facet strips and validation tables is
+# neutralized here, and figure titles no longer append an org name.
+df <- df |> mutate(hco = "HCO")
+if (!is.null(df.wide.tot)) df.wide.tot <- df.wide.tot |> ungroup() |> mutate(hco = "HCO")
+
+# --- INTERACTIVE USE (running chunks in RStudio, outside the Shiny app) ---
+# params then takes the YAML defaults (type=1, hco_name="A").
+# To work on the "B"/monthly version interactively, uncomment:
+# type = 2; hco.name = "B"
+ 
+```
+
+
+```{r overall-data}
+
+# data handling
+
+age.strata     <- c("65-70", "71-80", "81+")
+sex.strata     <- c("Female", "Male", "Unknown")
+race.strata    <- c("Asian", "Native Hawaiian or Other Pacific Islander",
+                    "American Indian or Alaska Native", "Black or African American",
+                    "Black", "White", "Race other", "Other Race", "Race missing/unknown")
+ethnicity.strata <- c("Hispanic", "Hispanic or Latino", "Not Hispanic or Latino",
+                      "Non-Hispanic", "Mexican", "Ethnicity missing/unknown")
+language.strata  <- c("English", "non-English", "Missing/unknown")
+
+hco_labels <- c(A="A") 
+
+# MODIFIED for Shiny app: hco now carries the real HCO name from the app
+# (not "test"), so fall back to the name itself when it's not in hco_labels.
+
+overall.dat <- df |>
+  filter(strata %in% age.strata) |>
+  mutate(hco2 = dplyr::coalesce(hco_labels[hco], hco)) |>
+  group_by(measure, hco2, time.f) |>
+  summarize(mean.pct = mean(pct), sum.n = sum(sample), .groups = "drop") |>
+  mutate(label.pct = as.character(round(mean.pct, 1)))
+
+overall.dat %>% as.data.frame()
+
+```
+
+```{r make-fig-fn}
+
+make.fig <- function(strata.vec, strata.name, rhs.name, title.text, hco.list, sgroup) {
+
+  formula.grid <- as.formula(paste0("measure ~", rhs.name))
+  
+  prep <- df |>
+    filter(strata %in% strata.vec,  strata.group %in% sgroup, sample>10)
+
+  tot <- prep |>
+    group_by(measure, time.f, hco) |>
+    summarize(tot.sample = sum(sample), .groups = "drop")
+
+  pdat <- prep |>
+    left_join(tot, by = c("measure", "time.f", "hco")) |>
+    mutate(n.tot = paste0("n= ", prettyNum(tot.sample, big.mark = ",", trim = TRUE)))
+
+  ggplot(pdat, aes(x = time.f, y = pct, group = strata, colour = strata)) +
+    labs(title  = paste0("Rates by measure, time, ", strata.name, " strata", title.text),
+         colour = paste0(strata.name, " groups"),
+         x = "Time (quarter)", y = "Percent") +
+    facet_grid(formula.grid, scales = "free") +
+    geom_point(size = 3) +
+    geom_line(linewidth = 1) +
+    geom_text(aes(y = 0, label = n.tot), vjust = 1.5, hjust = 0.5, colour = "black") +
+    scale_y_continuous(expand = expansion(mult = c(0.2, 0.2))) +
+    theme_bw(base_size = 15) +
+    theme(axis.text.x   = element_text(angle = 45, hjust = 1),
+          legend.position = "bottom",
+          plot.title      = element_text(size = 10)) +
+    guides(color = guide_legend(override.aes = aes(label = ""),
+                                nrow=2, byrow=T))
+}
+
+```
+
+```{r B-fig-fn}
+
+# Helper for org B option-2 nested-axis figures
+make.B.fig <- function(data, strata.col, strata.vec, facet_rhs, colour.lab, title.sfx) {
+  ggplot(data |> filter(.data[[strata.col]] %in% strata.vec,
+                         !.data[[strata.col]] %in% "Unknown"),
+         aes(x = interaction(time, time.f2), y = pct,
+             group = .data[[strata.col]], colour = .data[[strata.col]])) +
+    labs(title  = paste0("org B: Percent outcome by measure, time, and ", title.sfx,
+                         " strata using option 2 times"),
+         colour = colour.lab,
+         x = "Time (month, year, and quarter)", y = "Percent") +
+    facet_grid(as.formula(paste0("measure ~ ", facet_rhs)), scales = "free") +
+    geom_point() +
+    geom_line(linewidth = 1) +
+    geom_text(aes(y = 0, label = n.tot), vjust = 1.5, hjust = 0.5, size = 2) +
+    scale_y_continuous(expand = expansion(mult = c(0.5, 0.2))) +
+    guides(x     = "axis_nested",
+           fill  = "legend_group",
+           color = guide_legend(override.aes = aes(label = ""))) +
+    theme_bw(base_size = 15) +
+    theme(legend.position = "bottom", plot.title = element_text(size = 10))
+}
+
+# Pre-compute org B totals (reused across figures)
+if (type == 2) {
+  
+  B.tot <- df |>
+    group_by(measure, time.f, strata.group, time.f2, hco) |>
+    summarize(tot.sample = sum(sample), .groups = "drop")
+
+  all.dat2.prep <- df |>
+    left_join(B.tot, by = c("measure", "time.f", "strata.group", "time.f2", "hco")) |>
+    mutate(n.tot = paste0("n=\n", prettyNum(tot.sample, big.mark = ",", trim = TRUE)))
+}
+
+```
+
+<!-- ## Age strata -->
+
+```{r fig-age}
+make.fig(strata.vec = age.strata, strata.name = "age", sgroup = "Age",
+         rhs.name = ".", title.text = "", hco.list = hco.name)
+```
+
+
+
+<!-- ## Sex strata -->
+
+```{r fig-sex}
+make.fig(strata.vec = sex.strata, strata.name = "sex", sgroup = "Sex",
+         rhs.name = ".", title.text = "", hco.list = hco.name)
+```
+
+<!-- ## Race -->
+
+```{r fig-race}
+make.fig(strata.vec = race.strata, strata.name = "race", sgroup = "Race",
+         rhs.name = "hco", title.text = "", hco.list = hco.name)
+```
+
+
+<!-- ## Ethnicity strata -->
+
+```{r fig-ethnicity}
+make.fig(strata.vec = ethnicity.strata, strata.name = "ethnicity", sgroup = "Ethnicity",
+         rhs.name = "hco", title.text = "", hco.list = hco.name)
+```
+
+<!-- ## Preferred language strata -->
+
+```{r fig-language}
+if (type==1) # note: org B (type=2) does not have language.
+  make.fig(strata.vec = language.strata, strata.name = "language", sgroup = "Language",
+           rhs.name = "hco", title.text = "", hco.list = hco.name)
+```
+
+# Validation
+
+## Data validation step 1
+
+Check for any negative counts or counts with decimal points.
+
+```{r val1, results='markup'}
+v1 <- df |> filter(sample < 0 | outcome < 0)
+
+if (nrow(v1) == 0) print("No items to check for validation step 1.") else kable(v1)
+```
+
+## Data validation step 2
+
+Check for any counts in which the total sample (denominator) > outcome (numerator) count.
+
+**Note**: only for HCOs who use 'option 1' data reporting template.
+
+```{r val2, eval=T}
+
+if(type==1){
+
+  tots.sum.strata <- df |>
+  group_by(hco, measure, strata.group, time) |>
+  summarize(tot.sample = sum(sample), tot.outcome = sum(outcome), .groups = "drop")
+
+# Language totals also cover Race and Ethnicity groups
+# lang.rows <- df.wide.tot %>% filter(hco %in% hco.name) |> filter(strata.group == "Language")
+# df.wide.tot. <- bind_rows(df.wide.tot %>% filter(hco %in% hco.name),
+#                           mutate(lang.rows, strata.group = "Ethnicity"),
+#                           mutate(lang.rows, strata.group = "Race"))
+# df.wide.tot. %>% as.data.frame()
+
+
+# note that the language strata also applies to the race and ethnicity groups. 
+# create dups for those strata and add
+# --------------------------------------------------------
+df.wide.tot %>% as.data.frame() %>% tail(n=50)
+df.wide.tot.dup = df.wide.tot[df.wide.tot$strata.group=="Language",]
+# df.wide.tot.dup %>% as.data.frame()
+
+df.wide.tot.eth = df.wide.tot.dup %>%
+  mutate(strata.group="Ethnicity")
+#df.wide.tot.eth
+
+df.wide.tot.race = df.wide.tot.dup %>%
+  mutate(strata.group="Race")
+
+df.wide.tot. = rbind(df.wide.tot,
+                     df.wide.tot.eth,
+                     df.wide.tot.race)
+
+df.wide.tot. %>% as.data.frame()
+
+if(!hco.name %in% "org B"){
+  
+  both.tot.dat <- tots.sum.strata |>
+    left_join(df.wide.tot., by = c("measure", "strata.group", "hco", "time")) |>
+    mutate(diff.sample  = as.numeric(tot.sample)  - as.numeric(Sample),
+           diff.outcome = as.numeric(tot.outcome) - as.numeric(Outcome))
+  
+  dat.2 <- both.tot.dat |> filter(abs(diff.sample) > 0 | abs(diff.outcome) > 0)
+}
+
+}
+
+```
+
+
+```{r val2-print, results='markup'}
+if (type == 2) {
+  print("No items to check for validation step 2.") 
+} else if (nrow(dat.2) == 0) {
+  print("No items to check for validation step 2.")
+} else {
+  kable(dat.2)
+}
+```
+
+## Data validation step 3
+
+Check if there are outcome (numerator) counts less than or equal to total sample (denominator).
+
+```{r val3, results='markup'}
+dat.3 <- df |> filter(sample < outcome)
+
+if (nrow(dat.3) == 0) print("No items to check for validation step 3.") else kable(dat.3)
+
+```
+
+## Data validation step 4
+
+Determine if there are rates with more than a 20 percent change from prior period.
+
+```{r val4}
+# Helper to add missing quarter columns
+add_missing_quarters <- function(df) {
+  for (q in c("Jan-Mar '25", "Apr-Jun '25", "Jul-Sep '25", "Oct-Dec '25", "Jan-Mar '26"))
+    if (!q %in% names(df)) df[[q]] <- NA
+  df
+}
+
+make_val4_flextable <- function(df, caption_text, header_cols, header_span) {
+  df |>
+    as_grouped_data(groups = c("measure", columns = NULL)) |>
+    flextable() |>
+    set_table_properties(layout = "autofit") |>
+    set_caption(caption_text) |>
+    bold(i = ~ !is.na(measure), bold = TRUE, part = "body") |>
+    theme_zebra() |>
+    # add_header_row(top = TRUE,
+    #                values = c("", header_cols),
+    #                colwidths = c(3, header_span)) |>
+    align(i = 1, align = "center", part = "header")
+}
+
+if (type==2) {
+  grouped.ft <- all.dat2. |>
+    group_by(measure, strata.group, strata1, strata2) |>
+    arrange(year, month) |>
+    mutate(denom.change = ((sample - lag(sample)) / lag(sample)) * 100) |>
+    filter(abs(denom.change) > 20, sample > 30, !(year == 2024 & month == 10)) |>
+    dplyr::select(measure, strata.group, strata1, strata2, year, month, denom.change)
+} else {
+  grouped.ft <- df |>
+    group_by(measure, strata.group, strata) |>
+    arrange(time.f) |>
+    mutate(pct.change   = round(((pct - lag(pct)) / lag(pct)) * 100, 0),
+           pct          = round(pct, 0),
+           denom.change = round(((sample - lag(sample)) / lag(sample)) * 100, 0)) |>
+    filter(abs(denom.change) > 20, sample > 30, time.f != "Oct-Dec '24") |>
+    dplyr::select(measure, strata.group, strata, time.f, denom.change)
+}
+```
+
+
+### Table view
+
+```{r val4-table, results='markup'}
+
+caption_txt <- "Time periods with sample/denominator with more than a 20 percent change from prior period (and sample/denominator >30)"
+
+if (type==2) {
+  grouped.ft |>
+    pivot_wider(names_from = c("year", "month"), values_from = denom.change) |>
+    arrange(measure, strata.group, strata1, strata2) |>
+    make_val4_flextable(
+      caption_txt,
+      "Percent change of sample/denominator from prior period", 12) |>
+    set_header_labels(values = c("Measure", "Strata group", "Strata 1", "Strata 2",
+                                 "11/2024", "12/2024", "1/2025", "2/2025", "3/2025",
+                                 "4/2025", "5/2025", "6/2025", "7/2025", "8/2025", "9/2025",
+                                 "10/2025", "11/2025", "12/2025", "1/2026", "2/2026", "3/2026"))
+} else {
+  grouped.ft |>
+    pivot_wider(names_from = time.f, values_from = denom.change) |>
+    arrange(measure, strata.group, strata) |>
+    add_missing_quarters() |>
+    dplyr::select(measure, strata.group, strata,
+           `Jan-Mar '25`, `Apr-Jun '25`, `Jul-Sep '25`, `Oct-Dec '25`, `Jan-Mar '26`) |>
+    make_val4_flextable(caption_txt,
+                        "Percent change of sample/denominator from prior period", 5)
+}
+
+```
+
+

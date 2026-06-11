@@ -1,0 +1,368 @@
+---
+title: "read in data for Brain Health QI QC data report"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+params:
+  xlsx_path: "test.xlsx"
+  type: 1
+  hco_name: "A"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F, results = "hide",
+                      fig.width = 10, fig.height = 8)
+```
+
+
+<!-- IMPORTANT NOTE: In the excel data templates there is a sheet you have to correct formatting before the code below will work. In the language tab for measure 1, please make sure all the rows in the tab named, 'Data Entry race, ethn, & lang', from row 8 to row 31 are all merged. If not merged, you will get incorrect numbers for the totals. If using this script in the future, the data template should be corrected before distribution to HCOs. For now, I need to merge those rows mentioned above each time I re-load the excel file from the HCO submitted on RedCap. -->
+
+<!-- Note: I took code from /archive/scripts/brain-health-data-handling-int1.Rmd and put it in Claude to edit for conciseness. If any problems, check back with that script. -->
+
+```{r libraries}
+
+library(here)
+library(gt); library(gtsummary)
+library(tidyverse)
+library(readxl); library(kableExtra); library(flextable)
+library(legendry); library(patchwork)
+
+```
+
+
+```{r read-option1}
+
+# please read note above regarding reformatting excel sheets after reading new data from redcap
+# MODIFIED for Shiny app: the uploaded file path and template type now come in
+# as params instead of being hardcoded. The same path is placed at index 1 and 2
+# so that both read_opt1 (uses index 1) and read_opt2 (uses index 2) find it.
+
+fnames = data.frame(names=c(params$xlsx_path,
+                            params$xlsx_path),
+                    type = c(1,2)) 
+#fnames
+
+type = params$type # select type (monthly or quarterly data entry template)
+
+# --- INTERACTIVE USE (running chunks in RStudio, outside the Shiny app) ---
+# params then takes the YAML defaults (type=1, xlsx_path="test.xlsx").
+# To work on the org B/monthly template interactively, uncomment and edit:
+# fnames$names = rep("test2.xlsx", 2); type = 2
+
+```
+
+```{r}
+# make data frame for quarterly data entry type
+
+if (type==1) {
+
+# MODIFIED for Shiny app: option-1 ranges are now determined automatically.
+# Each sheet is read from the template's header row (row 6) and columns A:L,
+# open-ended downward, then TRUNCATED AT THE FIRST FULLY BLANK ROW. In the
+# template the data block is contiguous and a blank row separates it from the
+# validation tables below (which reuse the same strata labels and 'Total',
+# so they cannot be filtered by label — only by position). Verified against
+# the template: this reproduces the original A6:L39 / A6:L103 ranges exactly.
+# All columns are read as text so the three sheets always bind_rows()
+# consistently; the pipeline already converts values with as.numeric() below.
+opt1_range <- cellranger::cell_limits(c(6, 1), c(NA, 12))
+
+read_opt1 <- function(i, sheet.name, range.info = opt1_range) {
+  dat <- read_excel(file.path(fnames$names[i]), sheet = sheet.name,
+                    range = range.info, col_types = "text") |>
+    setNames(c("measure", "type", "strata", "bp1", "bp2", "bp3", "bp4",
+               "ip1.1", "ip1.2", "ip2.1", "ip2.2", "fi"))
+
+  # keep only the data block: everything before the first fully blank row
+  blank.row <- which(rowSums(!is.na(dat)) == 0)
+  if (length(blank.row) > 0) dat <- dat[seq_len(blank.row[1] - 1), ]
+
+  dat |>
+    mutate(hco = params$hco_name) # MODIFIED for Shiny app: was hardcoded "test"
+}
+
+read_fill <- function(i, sheet, src) {
+  read_opt1(i, sheet) |>
+    mutate(source = src) |>
+    fill(measure, type, .direction = "down")
+}
+
+age.dat <- map_dfr(1, read_fill, 
+  sheet = "Data Entry for age groups", 
+  src = "age")
+
+sex.dat <- map_dfr(c(1), read_fill,
+  sheet = "Data Entry for sex groups",  src = "sex")
+
+rel.raw <- map_dfr(c(1), read_opt1,
+  sheet.name = "Data Entry race, ethn, & lang") |>
+  mutate(source = "rel")
+
+rel.dat.tot <- rel.raw |>
+  mutate(measure = substr(measure, 1, 9)) |>
+  filter(grepl("Total", strata)) |>
+  fill(measure, .direction = "down")
+
+rel.dat <- rel.raw |>
+  filter(!is.na(strata)) |>
+  fill(measure, type, .direction = "down")
+
+all.dat <- bind_rows(age.dat, sex.dat, rel.dat) 
+
+#all.dat
+
+# data handling. general clean up
+# ===================================
+
+time_cols <- c("bp1", "bp2", "bp3", "bp4", "ip1.1", "ip1.2", "ip2.1", "ip2.2", "fi")
+
+df.all <- all.dat |>
+  mutate(measure = substr(measure, 1, 9),
+         type    = substr(type,    1, 7))
+
+df <- df.all |>
+  filter(complete.cases(measure), !grepl("Total", strata))
+
+#df
+
+# more data handling, convert from wide to long for time
+# ====================================================
+
+df.tot <- all.dat |>
+  mutate(
+    strata.group = case_when(
+      grepl("ethnicity", type) ~ "Ethnicity",
+      grepl("language",  type) ~ "Language",
+      grepl("sex",       type) ~ "Sex",
+      grepl("age",       type) ~ "Age",
+      grepl("race",      type) ~ "Race"),
+    type.info = ifelse(source == "rel", strata, type),
+    measure   = substr(measure, 1, 9),
+    type.sub  = case_when(
+      grepl("numer", type.info) ~ "Outcome",
+      grepl("denom", type.info) ~ "Sample")) |>
+  filter(grepl("Total", strata))
+
+df.long.tot <- df.tot |>
+  group_by(hco, measure, strata) |>
+  distinct() |>
+  pivot_longer(all_of(time_cols), names_to = "time", values_to = "value") |>
+  filter(complete.cases(value))
+
+df.long.tot %>% as.data.frame()
+
+df.wide.tot <- df.long.tot |>
+  ungroup() |>
+  distinct() |>
+  filter(!is.na(strata.group)) |>
+  dplyr::select(measure, type.sub, strata.group, hco, time, value) |>
+  distinct() |>
+  group_by(hco, measure, strata.group, time) |>
+  pivot_wider(names_from = type.sub, values_from = value)
+
+df.wide.tot %>% as.data.frame() %>% tail(n=50)
+
+# label time
+
+quarter_levels <- c("bp1","bp2","bp3","bp4","ip1.1","ip1.2")
+quarter_labels <- c("Oct-Dec '24","Jan-Mar '25","Apr-Jun '25","Jul-Sep '25","Oct-Dec '25","Jan-Mar '26")
+
+assign_strata_group <- function(s) {
+  case_when(
+    s %in% c("English", "non-English", "Missing/unknown")                        ~ "Language",
+    s %in% c("Asian", "Black", "White", "Race other", "Race missing/unknown")    ~ "Race",
+    s %in% c("Female", "Male", "Unknown")                                        ~ "Sex",
+    s %in% c("65-70", "71-80", "81+")                                            ~ "Age",
+    s %in% c("Hispanic", "Non-Hispanic", "Ethnicity missing/unknown")            ~ "Ethnicity")
+}
+
+df.wide <- df |>
+  pivot_longer(all_of(time_cols), names_to = "time", values_to = "value") |>
+  group_by(hco, measure, strata, time) |>
+  pivot_wider(names_from = type, values_from = value) |>
+  rename(sample = `Sample `, outcome = Outcome) |>
+  filter(complete.cases(sample)) |>
+  ungroup() |>
+  mutate(
+    outcome      = as.numeric(outcome),
+    sample       = as.numeric(sample),
+    pct          = outcome / sample * 100,
+    time.f       = factor(time, levels = quarter_levels, labels = quarter_labels),
+    strata.group = assign_strata_group(strata))
+
+df.wide
+
+df = df.wide
+
+}
+
+```
+
+
+<!-- ========================================= -->
+<!-- For monthly data template  option (org B) -->
+<!-- ========================================= -->
+
+```{r read-option2, eval=T}
+
+# test = read_excel(fnames$names[2], sheet = "Data Entry age & sex", range = "A2:G974")  %>% 
+#   setNames(c("measure", "year", "month", "strata1", "strata2", "denom", "num"))
+# 
+# test = test[complete.cases(test$denom),]
+# test %>% filter(measure==1 & year==2025 & month>9)
+
+if (type==2) {
+# MODIFIED for Shiny app: same data-block detection as option 1 — read
+# open-ended, then truncate at the first fully blank row. Verified against the
+# org B template: sheets are clean rectangular tables (header row 2, data
+# from row 3, nothing below), so this matches the data exactly and protects
+# against any notes added below the data in future submissions.
+# Column types are left to readxl's guessing (NOT forced to text) because the
+# option-2 pipeline below does arithmetic on denom/num directly.
+read_opt2 <- function(i, sheet.name, range.info, col_names) {
+  dat <- read_excel(file.path(fnames$names[i]), sheet = sheet.name, range = range.info) |>
+    setNames(col_names)
+
+  # keep only the data block: everything before the first fully blank row
+  blank.row <- which(rowSums(!is.na(dat)) == 0)
+  if (length(blank.row) > 0) dat <- dat[seq_len(blank.row[1] - 1), ]
+
+  dat |>
+    mutate(hco = params$hco_name) # MODIFIED for Shiny app: was hardcoded "org B"
+}
+
+# Age
+# MODIFIED for Shiny app: ranges are now dynamic (columns fixed, rows unbounded),
+# so row numbers no longer need manual updating for each submission.
+# Trailing empty/junk rows are removed by the complete.cases() filters below.
+age.dat2 <- map_dfr(2, read_opt2,
+  sheet.name = "Data Entry age & sex",
+  range.info  = cellranger::cell_limits(c(2, 1), c(NA, 7)), # was "A2:G974"
+  col_names   = c("measure", "year", "month", "strata1", "strata2", "denom", "num"))
+
+age.dat2 = age.dat2[complete.cases(age.dat2$denom),]
+age.dat2 %>% filter(measure==1 & year==2025 & month>9)
+
+# Race
+race.dat2 <- map_dfr(2, read_opt2,
+  sheet.name = "Data Entry race",
+  range.info  = cellranger::cell_limits(c(2, 1), c(NA, 6)), # MODIFIED: was "A2:F500"
+  col_names   = c("measure", "year", "month", "strata1", "denom", "num")) |>
+  mutate(
+    strata1 = case_when(
+      strata1 == "Unknown"                  ~ "Race missing/unknown",
+      strata1 == "Black or African American" ~ "Black",
+      TRUE                                  ~ strata1),
+    strata2 = NA)
+
+race.dat2 = race.dat2[complete.cases(race.dat2$denom),]
+
+# Ethnicity
+eth.dat2 <- map_dfr(2, read_opt2,
+  sheet.name = "Data Entry ethnicity",
+  range.info  = cellranger::cell_limits(c(2, 1), c(NA, 6)), # MODIFIED: was "A2:F500"
+  col_names   = c("measure", "year", "month", "strata1", "denom", "num")) |>
+  mutate(
+    strata1 = case_when(
+      strata1 == "Unknown"              ~ "Ethnicity missing/unknown",
+      strata1 %in% c("Mexican",
+                     "Hispanic or Latino") ~ "Hispanic",
+      strata1 == "Not Hispanic or Latino" ~ "Non-Hispanic",
+      TRUE                              ~ strata1),
+    strata2 = NA)
+
+eth.dat2 = eth.dat2[complete.cases(eth.dat2$denom),]
+
+all.dat2 <- bind_rows(age.dat2, race.dat2, eth.dat2)
+
+
+# more data handling for version 2 of template
+# -------------------------------------------------
+
+month_levels <- c("10/2024","11/2024","12/2024","1/2025","2/2025","3/2025",
+                  "4/2025","5/2025","6/2025","7/2025","8/2025","9/2025",
+                  "10/2025", "11/2025", "12/2025", "1/2026", "2/2026", "3/2026")
+month_labels_q  <- c(rep("Oct-Dec '24",3), rep("Jan-Mar '25",3),
+                     rep("Apr-Jun '25",3), rep("Jul-Sep '25",3),
+                     rep("Oct-Dec '25", 3), rep("Jan-Mar '26", 3))
+month_labels_q2 <- c(rep("Q4",3), rep("Q1",3), 
+                     rep("Q2",3), rep("Q3",3),
+                     rep("Q4",3), rep("Q1",3))
+
+all.dat2. <- all.dat2 |>
+  mutate(
+    time    = paste0(month, "/", year),
+    strata1 = gsub("\u2013", "-", strata1),   # fix em-dash
+    strata1 = case_when(
+      strata1 == "Other Race"                    ~ "Race other",
+      strata1 %in% c("Hispanic or Latino",
+                     "Mexican")                  ~ "Hispanic",
+      TRUE                                       ~ strata1),
+    strata.group = case_when(
+      strata1 %in% c("English","non-English","Missing/unknown")                         ~ "Language",
+      strata1 %in% c("Asian","Native Hawaiian or Other Pacific Islander",
+                     "American Indian or Alaska Native","Black or African American",
+                     "Black","White","Race other","Other Race","Race missing/unknown")   ~ "Race",
+      strata1 %in% c("65-70","71-80","81+")                                             ~ "Age",
+      strata1 %in% c("Hispanic","Non-Hispanic","Mexican","Ethnicity missing/unknown")   ~ "Ethnicity"),
+    time.f  = factor(time, levels = month_levels, labels = month_labels_q),
+    time.f2 = factor(time, levels = month_levels, labels = month_labels_q2),
+    measure = case_when(
+      measure == 1 ~ "Measure 1", measure == 2 ~ "Measure 2",
+      measure == 3 ~ "Measure 3", measure == 4 ~ "Measure 4"),
+    hco     = params$hco_name) |> # MODIFIED for Shiny app: was hardcoded "org B"
+  rename(sample = denom, outcome = num) |>
+  mutate(pct = outcome / sample * 100)
+
+
+# combine option 1 and option 2 together.
+
+summarise_quarter <- function(dat, grp_vars) {
+  dat |>
+    group_by(across(all_of(grp_vars))) |>
+    summarise(sample = sum(sample), outcome = sum(outcome), .groups = "drop") |>
+    mutate(pct = outcome / sample * 100)
+}
+
+all.dat2.combine.age <- all.dat2. |>
+  summarise_quarter(c("measure","hco","time.f","time.f2","strata1","strata.group")) |>
+  rename(strata = strata1)
+
+all.dat2.combine.sex <- all.dat2. |>
+  filter(strata.group == "Age") |>
+  mutate(strata2 = ifelse(strata2=="female", "Female",
+                         ifelse(strata2=="male", "Male",
+                                ifelse(strata2=="unknown", "Unknown", strata2))),
+         strata.group = ifelse(strata2 %in% c("Female","Male","Unknown"), "Sex", NA)) |>
+  summarise_quarter(c("measure","hco","time.f","time.f2","strata2","strata.group")) |>
+  rename(strata = strata2)
+
+df.wide.1.and.2 <- bind_rows(all.dat2.combine.sex, all.dat2.combine.age)
+
+df.wide.1.and.2 = df.wide.1.and.2 %>% 
+  #filter(!(strata.group=="Sex" & strata=="Unknown")) %>% # remove Unknown sex group (for now keep)
+  filter(complete.cases(time.f)==T) # remove missing times 
+
+with(df.wide.1.and.2, 
+     table(strata, strata.group))
+table(df.wide.1.and.2$hco)
+
+df = df.wide.1.and.2
+}
+
+```
+
+```{r}
+
+# MODIFIED for Shiny app: df.wide.tot only exists for type==1, so guard the save
+if (!exists("df.wide.tot")) df.wide.tot <- NULL
+
+save(df, df.wide.tot, file="dat.RData") 
+
+```
+
