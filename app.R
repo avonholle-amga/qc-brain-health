@@ -92,7 +92,7 @@ server <- function(input, output, session) {
       div(
         style = "background:#fff3cd; border:1px solid #ffeeba; padding:10px; border-radius:4px; margin-bottom:15px;",
         strong("Reminder (option 1 templates): "),
-        "in the 'Data Entry race, ethn, & lang' sheet, rows 8-31 of the ",
+        "in the 'Data Entry race, ethn, & lang' sheet, Column A, rows 8-31 of the ",
         "Measure 1 language section must be merged before upload, or totals ",
         "will be incorrect."
       )
