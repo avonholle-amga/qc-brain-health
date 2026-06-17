@@ -171,6 +171,8 @@ if (type == 2) {
 
 ```
 
+# Figures
+
 <!-- ## Age strata -->
 
 ```{r fig-age}
